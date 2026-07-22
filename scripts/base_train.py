@@ -56,6 +56,8 @@ parser.add_argument("--head-dim", type=int, default=128, help="target head dimen
 parser.add_argument("--n-kv-head", type=int, default=-1, help="number of key/value heads for GQA (-1 = match n_head)")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--hc-rate", type=int, default=4, help="hyper-connections expansion rate N")
+parser.add_argument("--hc-dynamic", type=bool, default=True, help="enable dynamic B/WC scheduling for hyper-connections")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")

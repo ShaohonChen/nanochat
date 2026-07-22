@@ -145,10 +145,31 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
-        x = x + self.mlp(norm(x))
-        return x
+
+        # attention 和 FFN 是两个连续子层，因此分别使用 2*i 和 2*i+1 初始化 HC
+        self.attn_hc = HyperConnection(config.n_embd, config.hc_rate, 2 * layer_idx, dynamic=config.hc_dynamic)
+        self.mlp_hc = HyperConnection(config.n_embd, config.hc_rate, 2 * layer_idx + 1, dynamic=config.hc_dynamic)
+
+
+    def forward(self, h, ve, cos_sin, window_size, kv_cache):
+        # Attention width connection: 从 H 混合出当前 attention 输入 h0 和保留路径 H'
+        mix_h, beta = self.attn_hc.width_connection(h)
+        # 对 h0 做 Pre-Norm，再送入 self-attention
+        x = norm(mix_h[..., 0, :])
+        x = self.attn(x, ve, cos_sin, window_size, kv_cache)
+        # Attention depth connection: 用动态 beta 把 attention 输出写回 hyper hidden
+        h = self.attn_hc.depth_connection(mix_h, x, beta)
+
+
+        # FFN width connection: 从新的 H 混合出当前 FFN 输入 h0 和保留路径 H'
+        mix_h, beta = self.mlp_hc.width_connection(h)
+        # 对 h0 做 Pre-Norm，再送入 FFN
+        x = norm(mix_h[..., 0, :])
+        x = self.mlp(x)
+        # FFN depth connection: 用动态 beta 把 FFN 输出写回 hyper hidden
+        h = self.mlp_hc.depth_connection(mix_h, x, beta)
+
+        return h
 
 
 class GPT(nn.Module):

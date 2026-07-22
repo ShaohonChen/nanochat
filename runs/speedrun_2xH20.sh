@@ -12,7 +12,7 @@
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
+export NANOCHAT_BASE_DIR="/data/home/lxy/project/nanochat-chenshaohon/output"
 mkdir -p $NANOCHAT_BASE_DIR
 
 # -----------------------------------------------------------------------------
@@ -73,6 +73,7 @@ wait $DATASET_DOWNLOAD_PID
 
 # d16 model. Use WANDB_RUN as the shared experiment/checkpoint tag.
 # n-kv-head=-1 means the default MHA model
+#     --window-pattern L \
 CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- \
     --depth=16 \
     --n-kv-head=-1 \
@@ -81,34 +82,36 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.bas
     --core-metric-max-per-task=500 \
     --device-batch-size=16 \
     --fp8 \
-    --run=${WANDB_RUN}_pretrain \
-    --model-tag=$WANDB_RUN \
+    --hc-rate 2 \
+    --hc-dynamic true \
+    --run=${SWANLAB_RUN} \
+    --model-tag=$SWANLAB_RUN \
     --project-name=$SWANLAB_PROJECT
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.base_eval -- --device-batch-size=16 --model-tag=$WANDB_RUN
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.base_eval -- --device-batch-size=16 --model-tag=$SWANLAB_RUN
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
 
 # download 2.3MB of synthetic identity conversations to impart a personality to nanochat
 # see dev/gen_synthetic_data.py for details on how this data was prepared and to get a sense of how you can easily tune it
-curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+# curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
-# run SFT and eval the model
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
-    --device-batch-size=16 \
-    --run=${WANDB_RUN}_sft \
-    --model-tag=$WANDB_RUN \
-    --project-name=$SWANLAB_PROJECT
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft --model-tag=$WANDB_RUN
+# # run SFT and eval the model
+# CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
+#     --device-batch-size=16 \
+#     --run=${WANDB_RUN}_sft \
+#     --model-tag=$WANDB_RUN \
+#     --project-name=$SWANLAB_PROJECT
+# CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft --model-tag=$WANDB_RUN
 
-# chat with the model over CLI! Leave out the -p to chat interactively
-# python -m scripts.chat_cli -p "Why is the sky blue?"
+# # chat with the model over CLI! Leave out the -p to chat interactively
+# # python -m scripts.chat_cli -p "Why is the sky blue?"
 
-# even better, chat with your model over a pretty WebUI ChatGPT style
-# python -m scripts.chat_web
+# # even better, chat with your model over a pretty WebUI ChatGPT style
+# # python -m scripts.chat_web
 
-# -----------------------------------------------------------------------------
-# Generate the full report by putting together all the sections
-# report.md is the output and will be copied to current directory for convenience
-python -m nanochat.report generate
+# # -----------------------------------------------------------------------------
+# # Generate the full report by putting together all the sections
+# # report.md is the output and will be copied to current directory for convenience
+# python -m nanochat.report generate
