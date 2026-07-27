@@ -37,9 +37,9 @@ export SWANLAB_ENABLE=1
 #    `wandb login`
 # 2) Set the WANDB_RUN environment variable when running this script, e.g.:
 #    `WANDB_RUN=2xH20_baseline_d16 bash runs/speedrun_2xH20.sh`
-WANDB_RUN="${WANDB_RUN:-2xH20_baseline_d16}"
-SWANLAB_PROJECT="${SWANLAB_PROJECT:-nanochat-2xH20}"
-export NANOCHAT_REPORT_SUFFIX="${NANOCHAT_REPORT_SUFFIX:-$WANDB_RUN}"
+SWANLAB_PROJECT="${SWANLAB_PROJECT:-nanochat-2xH20-context-length}"
+SWANLAB_RUN="${SWANLAB_RUN:-2xH20_len2048_d24_hc2_recompute}"
+export NANOCHAT_REPORT_SUFFIX="${NANOCHAT_REPORT_SUFFIX:-$SWANLAB_RUN}"
 
 # -----------------------------------------------------------------------------
 # During the course of the run, we will be writing markdown reports to the report/
@@ -71,24 +71,24 @@ python -m scripts.tok_eval
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
 # d16 model. Use WANDB_RUN as the shared experiment/checkpoint tag.
 # n-kv-head=-1 means the default MHA model
 #     --window-pattern L \
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- \
-    --depth=16 \
-    --n-kv-head=-1 \
-    --num-iterations=2000 \
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- \
+    --depth=24 \
     --core-metric-every=200 \
-    --core-metric-max-per-task=500 \
+    --target-param-data-ratio=8 \
     --device-batch-size=16 \
+    --max-seq-len=$MAX_SEQ_LEN \
     --fp8 \
     --hc-rate 2 \
-    --hc-dynamic true \
+    --hc-dynamic \
     --run=${SWANLAB_RUN} \
     --model-tag=$SWANLAB_RUN \
     --project-name=$SWANLAB_PROJECT
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.base_eval -- --device-batch-size=16 --model-tag=$SWANLAB_RUN
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 -m scripts.base_eval -- --device-batch-size=16 --model-tag=$SWANLAB_RUN
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
@@ -98,12 +98,12 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.bas
 # curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # # run SFT and eval the model
-# CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
+# CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 -m scripts.chat_sft -- \
 #     --device-batch-size=16 \
 #     --run=${WANDB_RUN}_sft \
 #     --model-tag=$WANDB_RUN \
 #     --project-name=$SWANLAB_PROJECT
-# CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft --model-tag=$WANDB_RUN
+# CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 -m scripts.chat_eval -- -i sft --model-tag=$WANDB_RUN
 
 # # chat with the model over CLI! Leave out the -p to chat interactively
 # # python -m scripts.chat_cli -p "Why is the sky blue?"

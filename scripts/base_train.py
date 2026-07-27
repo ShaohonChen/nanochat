@@ -57,7 +57,7 @@ parser.add_argument("--n-kv-head", type=int, default=-1, help="number of key/val
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
 parser.add_argument("--hc-rate", type=int, default=4, help="hyper-connections expansion rate N")
-parser.add_argument("--hc-dynamic", type=bool, default=True, help="enable dynamic B/WC scheduling for hyper-connections")
+parser.add_argument("--hc-dynamic", action="store_true", default=False, help="enable dynamic B/WC scheduling for hyper-connections")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -339,6 +339,24 @@ if resuming:
     del optimizer_data
 
 # -----------------------------------------------------------------------------
+# HC dynamic warmup: freeze dynamic HC first, then enable later
+
+def zero_hc_dynamic_grads(model):
+    for block in model.transformer.h:
+        for hc in (block.attn_hc, block.mlp_hc):
+            for name in (
+                "dynamic_alpha_fn",
+                "dynamic_beta_fn",
+                "dynamic_alpha_scale",
+                "dynamic_beta_scale",
+            ):
+                if hasattr(hc, name):
+                    p = getattr(hc, name)
+                    if p.grad is not None:
+                        p.grad.zero_()
+
+
+# -----------------------------------------------------------------------------
 # GradScaler for fp16 training (bf16/fp32 don't need it — bf16 has the same exponent range as fp32)
 scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
@@ -535,6 +553,10 @@ while True:
         else:
             loss.backward()
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+    
+    if step < 100:
+        zero_hc_dynamic_grads(orig_model)   
+
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)

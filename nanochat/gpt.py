@@ -25,6 +25,9 @@ from nanochat.optim import MuonAdamW, DistMuonAdamW
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
 from nanochat.flash_attention import flash_attn
 
+# hc activation checkpoint save
+from torch.utils.checkpoint import checkpoint
+
 @dataclass
 class GPTConfig:
     sequence_len: int = 2048
@@ -242,21 +245,32 @@ class Block(nn.Module):
 
 
     def forward(self, h, ve, cos_sin, window_size, kv_cache):
-        # Attention width connection: 从 H 混合出当前 attention 输入 h0 和保留路径 H'
-        mix_h, beta = self.attn_hc.width_connection(h)
-        # 对 h0 做 Pre-Norm，再送入 self-attention
+        if self.training and kv_cache is None:
+            mix_h, beta = checkpoint(
+                self.attn_hc.width_connection,
+                h,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        else:
+            mix_h, beta = self.attn_hc.width_connection(h)
+
         x = norm(mix_h[..., 0, :])
         x = self.attn(x, ve, cos_sin, window_size, kv_cache)
-        # Attention depth connection: 用动态 beta 把 attention 输出写回 hyper hidden
         h = self.attn_hc.depth_connection(mix_h, x, beta)
 
+        if self.training and kv_cache is None:
+            mix_h, beta = checkpoint(
+                self.mlp_hc.width_connection,
+                h,
+                use_reentrant=False,
+                preserve_rng_state=False,
+            )
+        else:
+            mix_h, beta = self.mlp_hc.width_connection(h)
 
-        # FFN width connection: 从新的 H 混合出当前 FFN 输入 h0 和保留路径 H'
-        mix_h, beta = self.mlp_hc.width_connection(h)
-        # 对 h0 做 Pre-Norm，再送入 FFN
         x = norm(mix_h[..., 0, :])
         x = self.mlp(x)
-        # FFN depth connection: 用动态 beta 把 FFN 输出写回 hyper hidden
         h = self.mlp_hc.depth_connection(mix_h, x, beta)
 
         return h
@@ -436,7 +450,6 @@ class GPT(nn.Module):
         nparams_exclude = (
                 self.transformer.wte.weight.numel()
                 + value_embeds_numel
-                + self.lm_head.weight.numel()
                 + self.smear_gate.weight.numel()
                 + self.smear_lambda.numel()
             )        
@@ -463,17 +476,17 @@ class GPT(nn.Module):
         # depth connection: beta * h_0 + H_prime, 约 N * D
         if getattr(self.config, "hc_dynamic", True):
             hc_flops = hc_sublayers * (
-                n * d * (n + 1)
-                + n * d
-                + (n + 1) * n * d
-                + n * d
+                2 * n * d * (n + 1)      # dynamic alpha matmul
+                + 2 * n * d              # dynamic beta matmul
+                + 2 * (n + 1) * n * d    # width connection matmul/einsum
+                + 2 * n * d              # depth connection einsum
             )
         else:
             hc_flops = hc_sublayers * (
-                (n + 1) * n * d
-                + n * d
+                2 * (n + 1) * n * d
+                + 2 * n * d
             )
-        num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops + hc_flops
+        num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops + 3 * hc_flops
         return num_flops_per_token
 
     def num_scaling_params(self):
@@ -615,10 +628,10 @@ class GPT(nn.Module):
             dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.01),
 
             # HC static B / WC：可训练，但不做 weight decay
-            dict(kind='adamw', params=hc_static_params, lr=scalar_lr, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=hc_static_params, lr=0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
 
             # HC dynamic B / WC：可训练，并使用 weight decay
-            dict(kind='adamw', params=hc_dynamic_params, lr=matrix_lr * dmodel_lr_scale, betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay),
+            dict(kind='adamw', params=hc_dynamic_params, lr=0.03, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.01),
 
             # Smear 参数保持独立
             dict(kind='adamw', params=smear_params, lr=0.2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
