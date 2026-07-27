@@ -56,6 +56,8 @@ parser.add_argument("--head-dim", type=int, default=128, help="target head dimen
 parser.add_argument("--n-kv-head", type=int, default=-1, help="number of key/value heads for GQA (-1 = match n_head)")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--hc-rate", type=int, default=4, help="hyper-connections expansion rate N")
+parser.add_argument("--hc-dynamic", action="store_true", default=False, help="enable dynamic B/WC scheduling for hyper-connections")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -146,6 +148,8 @@ def build_model_meta(depth):
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim,
         window_pattern=args.window_pattern,
+        hc_rate=args.hc_rate,
+        hc_dynamic=args.hc_dynamic,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -161,7 +165,8 @@ model.init_weights() # 3) All tensors get initialized
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
-output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
+hc_tag = f"dhc{args.hc_rate}" if args.hc_dynamic else f"shc{args.hc_rate}"
+output_dirname = args.model_tag if args.model_tag else f"d{args.depth}_{hc_tag}" # e.g. d12_dhc4
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
 resuming = args.resume_from_step != -1
 if resuming:
@@ -272,7 +277,12 @@ print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 def get_scaling_params(m):
     # As for which params to use exactly, transformer matrices + lm_head gives cleanest scaling laws (see dev/LOG.md Jan 27, 2026)
     params_counts = m.num_scaling_params()
-    scaling_params = params_counts['transformer_matrices'] + params_counts['lm_head']
+    scaling_params = (
+        params_counts['transformer_matrices']
+        + params_counts['hc_static']
+        + params_counts['hc_dynamic']
+        + params_counts['lm_head']
+    )
     return scaling_params
 num_scaling_params = get_scaling_params(model)
 target_tokens = int(args.target_param_data_ratio * num_scaling_params) # optimal tokens for the model we are about to train
@@ -327,6 +337,24 @@ optimizer = model.setup_optimizer(
 if resuming:
     optimizer.load_state_dict(optimizer_data)
     del optimizer_data
+
+# -----------------------------------------------------------------------------
+# HC dynamic warmup: freeze dynamic HC first, then enable later
+
+def zero_hc_dynamic_grads(model):
+    for block in model.transformer.h:
+        for hc in (block.attn_hc, block.mlp_hc):
+            for name in (
+                "dynamic_alpha_fn",
+                "dynamic_beta_fn",
+                "dynamic_alpha_scale",
+                "dynamic_beta_scale",
+            ):
+                if hasattr(hc, name):
+                    p = getattr(hc, name)
+                    if p.grad is not None:
+                        p.grad.zero_()
+
 
 # -----------------------------------------------------------------------------
 # GradScaler for fp16 training (bf16/fp32 don't need it — bf16 has the same exponent range as fp32)
@@ -525,6 +553,10 @@ while True:
         else:
             loss.backward()
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+    
+    if step < 100:
+        zero_hc_dynamic_grads(orig_model)   
+
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
